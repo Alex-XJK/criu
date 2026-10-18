@@ -2270,9 +2270,23 @@ static int interconnected_pair(struct unix_sk_info *ui, struct unix_sk_info *pee
 	 * after add_fake_fds_masters(), so we must not add masters,
 	 * which fle->task has no permissions to restore. But
 	 * it has permissions on ui, so it has permissions on peer.
+	 *
+	 * The task has to be the one with the higher restore priority
+	 * of the two, as get_fle_for_task() leaves an fle the task
+	 * already has where it is, and a task that holds both ends
+	 * while another task of a lower pid holds one would otherwise
+	 * stay behind that task in the master list of that end.
 	 */
-	if (fle->task != fle_peer->task && !get_fle_for_task(&peer->d, fle->task, true))
-		return -1;
+	if (fle->task == fle_peer->task)
+		return 0;
+
+	if (fdinfo_rst_prio(fle, fle_peer)) {
+		if (!get_fle_for_task(&peer->d, fle->task, true))
+			return -1;
+	} else {
+		if (!get_fle_for_task(&ui->d, fle_peer->task, true))
+			return -1;
+	}
 
 	return 0;
 }
