@@ -771,6 +771,7 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 		{ "compress-block", required_argument, 0, 1103 },
 		{ "decompress-threads", required_argument, 0, 1104 },
 		{ "plugin-option", required_argument, 0, 1105 },
+		{ "next-images-dir", required_argument, 0, 1106 },
 		{},
 	};
 
@@ -975,6 +976,9 @@ int parse_options(int argc, char **argv, bool *usage_error, bool *has_exec_cmd, 
 			break;
 		case 1053:
 			SET_CHAR_OPTS(img_parent, optarg);
+			break;
+		case 1106:
+			SET_CHAR_OPTS(next_images_dir, optarg);
 			break;
 		case 1057:
 			if (parse_cpu_cap(&opts, optarg))
@@ -1331,6 +1335,29 @@ int check_options(void)
 		if (check_mount_v2()) {
 			pr_debug("Mount engine fallback to --mntns-compat-mode mode\n");
 			opts.mntns_compat_mode = true;
+		}
+	}
+
+	if (opts.next_images_dir) {
+		if (opts.mode != CR_RESTORE) {
+			pr_err("Option --next-images-dir is only valid on restore\n");
+			return 1;
+		}
+		opts.track_mem = true;
+	}
+
+	if (opts.track_mem && opts.mode == CR_RESTORE) {
+		if (opts.lazy_pages) {
+			pr_err("--track-mem on restore cannot be used with --lazy-pages\n");
+			return 1;
+		}
+		if (opts.auto_dedup) {
+			pr_err("--track-mem on restore cannot be used with --auto-dedup\n");
+			return 1;
+		}
+		if (opts.stream) {
+			pr_err("--track-mem on restore cannot be used with --stream\n");
+			return 1;
 		}
 	}
 

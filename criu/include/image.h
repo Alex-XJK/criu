@@ -198,6 +198,8 @@ extern off_t img_raw_size(struct cr_img *img);
 extern int image_dir_mode(void);
 extern int open_image_dir(const char *dir, int mode);
 extern void close_image_dir(void);
+extern int open_next_images_dir(const char *dir);
+extern int get_next_images_dir_fd(void);
 /*
  * Return -1 -- parent symlink points to invalid target
  * Return 0 && pfd < 0 -- parent symlink does not exist
