@@ -1895,6 +1895,60 @@ out:
 	return ret;
 }
 
+static int read_last_pid(void *arg)
+{
+	unsigned int *last_pid = arg;
+	char buf[32];
+	int fd, len;
+
+	fd = open_proc(PROC_GEN, LAST_PID_PATH);
+	if (fd < 0)
+		return -1;
+
+	len = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (len <= 0) {
+		pr_perror("Can't read /proc/%s", LAST_PID_PATH);
+		return -1;
+	}
+	buf[len] = '\0';
+	*last_pid = strtoul(buf, NULL, 10);
+	return 0;
+}
+
+static int write_last_pid(void *arg)
+{
+	unsigned int *last_pid = arg;
+	char buf[32];
+	int fd, len;
+
+	fd = open_proc_rw(PROC_GEN, LAST_PID_PATH);
+	if (fd < 0)
+		return -1;
+
+	len = snprintf(buf, sizeof(buf), "%u", *last_pid);
+	if (write(fd, buf, len) != len) {
+		pr_perror("Can't write %s to /proc/%s", buf, LAST_PID_PATH);
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	return 0;
+}
+
+/* ns_last_pid is the caller's, so @fn runs in a child born in @pid's pidns */
+static int pid_ns_last_pid_op(pid_t pid, int (*fn)(void *), unsigned int *last_pid)
+{
+	int rst, ret;
+
+	if (switch_ns(pid, &pid_ns_desc, &rst))
+		return -1;
+	ret = call_in_child_process(fn, last_pid);
+	if (restore_ns(rst, &pid_ns_desc))
+		ret = -1;
+	return ret;
+}
+
 static int read_pid_ns_img(void)
 {
 	struct ns_id *ns;
@@ -1917,8 +1971,64 @@ static int read_pid_ns_img(void)
 			pr_err("Can not read pidns object\n");
 			return -1;
 		}
-		if (ret > 0)
+		if (ret > 0) {
 			ns->ext_key = e->ext_key;
+			if (e->has_last_pid) {
+				ns->pid.last_pid = e->last_pid;
+				ns->pid.has_last_pid = true;
+			}
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Restored tasks keep their pids, but a new namespace's allocator starts
+ * from the bottom, so tasks forked after the restore would get pids below
+ * the restored ones. Put ns_last_pid back where the dump found it. An
+ * older image has no such value; then the highest restored pid of the root
+ * namespace is used.
+ */
+int restore_pid_ns_last_pid(void)
+{
+	struct ns_id *ns;
+
+	/* The tasks go into criu's own or a joined pid namespace: not ours to touch */
+	if (!(root_ns_mask & CLONE_NEWPID))
+		return 0;
+
+	for (ns = ns_ids; ns != NULL; ns = ns->next) {
+		struct pstree_item *item, *task = NULL;
+		unsigned int last_pid = 0;
+
+		if (ns->nd != &pid_ns_desc || ns->type == NS_CRIU || ns->ext_key)
+			continue;
+
+		if (ns->pid.has_last_pid) {
+			last_pid = ns->pid.last_pid;
+		} else if (ns->type == NS_ROOT) {
+			for_each_pstree_item(item)
+				if (vpid(item) > last_pid)
+					last_pid = vpid(item);
+		} else {
+			continue;
+		}
+
+		for_each_pstree_item(item) {
+			if (task_alive(item) && item->ids && item->ids->pid_ns_id == ns->id) {
+				task = item;
+				break;
+			}
+		}
+		if (!task) {
+			pr_warn("No task to set the last pid of pidns %d\n", ns->id);
+			continue;
+		}
+
+		pr_info("Setting pidns %d last pid to %u\n", ns->id, last_pid);
+		if (pid_ns_last_pid_op(task->pid->real, write_last_pid, &last_pid))
+			return -1;
 	}
 
 	return 0;
@@ -1976,17 +2086,19 @@ static int collect_pid_ns(struct ns_id *ns, void *oarg)
 
 	snprintf(id, sizeof(id), "pid[%u]", ns->kid);
 	val = external_lookup_by_key(id);
-	if (PTR_RET(val))
-		return 0;
-
-	/*
-	 * Only if the user marked the PID namespace as external
-	 * via --external pid[<inode>]:<label> the pidns
-	 * image is written.
-	 */
-
-	pr_debug("The %s pidns is external\n", id);
-	ns->ext_key = e.ext_key = val;
+	if (!PTR_RET(val)) {
+		/* Marked as external via --external pid[<inode>]:<label> */
+		pr_debug("The %s pidns is external\n", id);
+		ns->ext_key = e.ext_key = val;
+	} else {
+		/* Only namespaces criu will create get their allocator restored */
+		if (ns->type == NS_CRIU || !(root_ns_mask & CLONE_NEWPID))
+			return 0;
+		if (pid_ns_last_pid_op(ns->ns_pid, read_last_pid, &e.last_pid))
+			return -1;
+		e.has_last_pid = true;
+		pr_info("Pidns %d last pid is %u\n", ns->id, e.last_pid);
+	}
 
 	img = open_image(CR_FD_PIDNS, O_DUMP, ns->id);
 	if (!img)
