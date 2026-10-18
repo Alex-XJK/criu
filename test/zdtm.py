@@ -1041,6 +1041,8 @@ class criu_rpc:
                 continue
             elif "--prev-images-dir" == arg:
                 criu.opts.parent_img = args.pop(0)
+            elif "--next-images-dir" == arg:
+                criu.opts.next_images_dir = args.pop(0)
             elif "--pre-dump-mode" == arg:
                 key = args.pop(0)
                 mode = crpc.rpc.VM_READ
@@ -1191,6 +1193,7 @@ class criu:
         self.__script = opts['script']
         self.__sat = bool(opts['sat'])
         self.__dedup = bool(opts['dedup'])
+        self.__next_images = bool(opts['next_images'])
         self.__mdedup = bool(opts['noauto_dedup'])
         self.__user = bool(opts['user'])
         self.__rootless = bool(opts['rootless'])
@@ -1657,7 +1660,7 @@ class criu:
         if self.__prev_dump_iter:
             a_opts += [
                 "--prev-images-dir",
-                "../%d" % self.__prev_dump_iter, "--track-mem"
+                "../%s" % self.__prev_dump_iter, "--track-mem"
             ]
         self.__prev_dump_iter = self.__iter
 
@@ -1798,6 +1801,13 @@ class criu:
             r_opts += ["--image-io-mode", self.__image_io_mode]
 
         self.__prev_dump_iter = None
+        # Restore with --next-images-dir, so that the next dump is incremental
+        # against the images being restored: its parent is "<iter>.next".
+        next_images = None
+        if self.__next_images:
+            next_images = "%d.next" % self.__iter
+            os.mkdir(os.path.join(self.__dump_path, next_images))
+            r_opts += ["--next-images-dir", os.path.join(self.__dump_path, next_images)]
         criu_dir = os.path.dirname(os.getcwd())
         if os.getenv("GCOV"):
             r_opts.append('--external')
@@ -1836,6 +1846,7 @@ class criu:
                 raise test_fail_exc("criu-image-streamer (serve) exited with %d" % ret)
 
         self.show_stats("restore")
+        self.__prev_dump_iter = next_images
 
         if self.__leave_stopped:
             pstree_check_stopped(self.__test.getpid())
@@ -2434,7 +2445,7 @@ class Launcher:
               'page_server_socket', 'sibling',
               'stop', 'empty_ns', 'fault', 'keep_img', 'report', 'snaps',
               'sat', 'script', 'rpc', 'criu_config', 'lazy_pages', 'join_ns',
-              'dedup', 'sbs', 'freezecg', 'user', 'dry_run', 'noauto_dedup',
+              'dedup', 'next_images', 'sbs', 'freezecg', 'user', 'dry_run', 'noauto_dedup',
               'remote_lazy_pages', 'show_stats', 'lazy_migrate', 'stream',
               'tls', 'criu_bin', 'crit_bin', 'pre_dump_mode', 'image_io_mode', 'mntns_compat_mode',
               'rootless', 'preload_libfault', 'mocked_cuda_checkpoint', 'cuda_checkpoint',
@@ -3065,6 +3076,10 @@ def get_cli_args():
                     action='store_true')
     rp.add_argument("--noauto-dedup",
                     help="Manual deduplicate images on iterations",
+                    action='store_true')
+    rp.add_argument("--next-images",
+                    help="Restore with --next-images-dir, so that the next "
+                    "dump on iterations is incremental against the restored images",
                     action='store_true')
     rp.add_argument("--nocr",
                     help="Do not CR anything, just check test works",
