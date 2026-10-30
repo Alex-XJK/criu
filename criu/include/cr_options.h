@@ -180,6 +180,7 @@ struct cr_options {
 	int ps_socket;
 	int track_mem;
 	char *img_parent;
+	char *next_images_dir;
 	int auto_dedup;
 	unsigned int cpu_cap;
 	int force_irmap;

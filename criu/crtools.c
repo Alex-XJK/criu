@@ -247,6 +247,10 @@ int main(int argc, char *argv[], char *envp[])
 		}
 	}
 
+	if (opts.mode == CR_RESTORE && opts.next_images_dir &&
+	    open_next_images_dir(opts.next_images_dir))
+		return 1;
+
 	/*
 	 * When a process group becomes an orphan,
 	 * its processes are sent a SIGHUP signal
@@ -534,8 +538,12 @@ usage:
 	       "  --display-stats       print out dump/restore stats\n"
 	       "\n"
 	       "* Memory dumping options:\n"
-	       "  --track-mem           turn on memory changes tracker in kernel\n"
+	       "  --track-mem           turn on memory changes tracker in kernel; on restore,\n"
+	       "                        reset it for the restored tasks before they resume\n"
 	       "  --prev-images-dir DIR path to images from previous dump (relative to -D)\n"
+	       "  --next-images-dir DIR on restore, write the parent images for the next\n"
+	       "                        incremental dump of the restored tasks into DIR\n"
+	       "                        (an empty directory; implies --track-mem)\n"
 	       "  --page-server         send pages to page server (see options below as well)\n"
 	       "  --auto-dedup          when used on dump it will deduplicate \"old\" data in\n"
 	       "                        pages images of previous dump\n"

@@ -596,6 +596,19 @@ usually need to be escaped from shell.
 *-d*, *--restore-detached*::
     Detach *criu* itself once restore is complete.
 
+*--track-mem*::
+    Reset the memory changes tracker of the restored tasks before they
+    resume, so that a following *dump* with *--track-mem* and
+    *--next-images-dir* as its *--prev-images-dir* writes only the pages
+    changed since the restore.
+
+*--next-images-dir* 'path'::
+    Write into 'path', an existing empty directory, the parent images for
+    the next incremental *dump* of the restored tasks. The images being
+    restored are not modified. Implies *--track-mem*. Cannot be used with
+    *--lazy-pages*, *--auto-dedup* or *--stream*. Shared memory is not
+    covered and is dumped in full.
+
 *-s*, *--leave-stopped*::
     Leave tasks in stopped state after restore (rather than resuming
     their execution).

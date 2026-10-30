@@ -104,6 +104,8 @@
 #include "images/vma.pb-c.h"
 #include "images/rlimit.pb-c.h"
 #include "images/pagemap.pb-c.h"
+#include "images/inventory.pb-c.h"
+#include "pagemap.h"
 #include "images/siginfo.pb-c.h"
 
 #include "restore.h"
@@ -2059,6 +2061,227 @@ static void reap_zombies(void)
 	}
 }
 
+/*
+ * Restore with --track-mem resets the soft-dirty bits of the restored
+ * tasks before they resume, so the next dump can be incremental against
+ * the images they were restored from. --next-images-dir gets the parent
+ * for that dump: pagemaps with every entry in parent, no pages, a parent
+ * link to the restored images and an inventory with dump_uptime set to
+ * one tick after the newest restored task's start time, so that tasks
+ * created after the restore still fail the pid-reuse check. The restored
+ * images are left untouched.
+ */
+static int write_next_pagemap(int nfd, struct pstree_item *item)
+{
+	struct cr_img *pmi, *npmi = NULL, *npi = NULL;
+	PagemapHead *h;
+	u32 pages_id;
+	int ret = -1;
+
+	pmi = open_image(CR_FD_PAGEMAP, O_RSTR, vpid(item));
+	if (!pmi)
+		return -1;
+	if (empty_image(pmi)) {
+		close_image(pmi);
+		return 0;
+	}
+
+	if (pb_read_one(pmi, &h, PB_PAGEMAP_HEAD) < 0)
+		goto out;
+	pagemap_head__free_unpacked(h, NULL);
+
+	npmi = open_image_at(nfd, CR_FD_PAGEMAP, O_DUMP, vpid(item));
+	if (!npmi)
+		goto out;
+	npi = open_pages_image_at(nfd, O_DUMP, npmi, &pages_id);
+	if (!npi)
+		goto out;
+
+	while (1) {
+		PagemapEntry *pe, hole = PAGEMAP_ENTRY__INIT;
+
+		ret = pb_read_one_eof(pmi, &pe, PB_PAGEMAP);
+		if (ret <= 0)
+			break;
+
+		hole.vaddr = pe->vaddr;
+		hole.nr_pages = pe->has_nr_pages ? pe->nr_pages : pe->compat_nr_pages;
+		hole.has_nr_pages = true;
+		hole.flags = PE_PARENT;
+		hole.has_flags = true;
+		pagemap_entry__free_unpacked(pe, NULL);
+
+		ret = pb_write_one(npmi, &hole, PB_PAGEMAP);
+		if (ret < 0)
+			break;
+	}
+out:
+	if (npi)
+		close_image(npi);
+	if (npmi)
+		close_image(npmi);
+	close_image(pmi);
+	return ret;
+}
+
+static int fd_path(int fd, char *buf, size_t len)
+{
+	char fdpath[64];
+	ssize_t n;
+
+	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", fd);
+	n = readlink(fdpath, buf, len - 1);
+	if (n < 0) {
+		pr_perror("Can't resolve the path of fd %d", fd);
+		return -1;
+	}
+	buf[n] = '\0';
+	return 0;
+}
+
+/*
+ * Relative like the --prev-images-dir link: tasks open it through the
+ * directory fd once they are in the restored root.
+ */
+static int link_next_parent(int nfd)
+{
+	char imgs[PATH_MAX], next[PATH_MAX], target[PATH_MAX];
+	const char *rest;
+	size_t i, common = 0, off = 0;
+
+	if (fd_path(get_service_fd(IMG_FD_OFF), imgs, sizeof(imgs)) ||
+	    fd_path(nfd, next, sizeof(next)))
+		return -1;
+
+	for (i = 0; imgs[i] && imgs[i] == next[i]; i++)
+		if (imgs[i] == '/')
+			common = i;
+	if ((!imgs[i] && (!next[i] || next[i] == '/')) || (!next[i] && imgs[i] == '/'))
+		common = i;
+
+	for (rest = next + common; *rest; rest++) {
+		if (*rest == '/' && rest[1] && off + 3 < sizeof(target)) {
+			memcpy(target + off, "../", 3);
+			off += 3;
+		}
+	}
+	rest = imgs + common;
+	if (*rest == '/')
+		rest++;
+	if (!off && !*rest) {
+		pr_err("The next images dir %s is the images dir\n", next);
+		return -1;
+	}
+	if (off + strlen(rest) >= sizeof(target)) {
+		pr_err("Parent path too long\n");
+		return -1;
+	}
+	strcpy(target + off, rest);
+	if (off && !*rest)
+		target[off - 1] = '\0';
+
+	if (symlinkat(target, nfd, CR_PARENT_LINK)) {
+		pr_perror("Can't link %s as the parent of the next images", target);
+		return -1;
+	}
+	pr_info("Next images parent: %s\n", target);
+	return 0;
+}
+
+static int prepare_next_images(void)
+{
+	struct pstree_item *item;
+	int nfd = get_next_images_dir_fd();
+
+	if (nfd < 0)
+		return 0;
+
+	if (link_next_parent(nfd))
+		return -1;
+
+	for_each_pstree_item(item) {
+		if (write_next_pagemap(nfd, item))
+			return -1;
+	}
+	return 0;
+}
+
+static int write_next_inventory(int nfd, uint64_t dump_uptime)
+{
+	struct cr_img *img;
+	InventoryEntry *ie;
+	int ret;
+
+	img = open_image(CR_FD_INVENTORY, O_RSTR);
+	if (!img)
+		return -1;
+	ret = pb_read_one(img, &ie, PB_INVENTORY);
+	close_image(img);
+	if (ret < 0)
+		return -1;
+
+	ie->dump_uptime = dump_uptime;
+	ie->has_dump_uptime = true;
+	/* holes only, no compressed payload */
+	ie->has_compress = true;
+	ie->compress = COMPRESS_OFF;
+	ie->has_compress_block_size = false;
+
+	img = open_image_at(nfd, CR_FD_INVENTORY, O_DUMP);
+	if (!img) {
+		ret = -1;
+	} else {
+		ret = pb_write_one(img, ie, PB_INVENTORY);
+		close_image(img);
+	}
+	inventory_entry__free_unpacked(ie, NULL);
+	return ret;
+}
+
+static int restore_track_mem(void)
+{
+	struct pstree_item *item;
+	struct proc_pid_stat pps;
+	unsigned long long epoch = 0;
+	uint64_t upt;
+	long tps;
+	int nfd;
+
+	tps = sysconf(_SC_CLK_TCK);
+	if (tps == -1) {
+		pr_perror("Failed to get clock ticks via sysconf");
+		return -1;
+	}
+
+	for_each_pstree_item(item) {
+		if (!task_alive(item))
+			continue;
+		if (do_task_reset_dirty_track(item->pid->real)) {
+			pr_err("Can't reset dirty tracking of pid %d\n", item->pid->real);
+			return -1;
+		}
+		if (parse_pid_stat(item->pid->real, &pps) < 0)
+			return -1;
+		if (pps.start_time >= epoch)
+			epoch = pps.start_time + 1;
+	}
+	pr_info("Dirty tracking reset; restored tasks started before tick %llu\n", epoch);
+
+	nfd = get_next_images_dir_fd();
+	if (nfd >= 0 && write_next_inventory(nfd, epoch * (USEC_PER_SEC / tps)))
+		return -1;
+
+	/* tasks forked after the restore must not start before the epoch */
+	while (1) {
+		if (parse_uptime(&upt))
+			return -1;
+		if (upt / (USEC_PER_SEC / tps) >= epoch)
+			break;
+		usleep(1000);
+	}
+	return 0;
+}
+
 static int restore_root_task(struct pstree_item *init)
 {
 	int ret, fd, mnt_ns_fd = -1;
@@ -2345,6 +2568,9 @@ skip_ns_bouncing:
 	if (restore_pid_ns_last_pid())
 		goto out_kill_network_unlocked;
 
+	if (opts.track_mem && restore_track_mem())
+		goto out_kill_network_unlocked;
+
 	ret = run_scripts(ACT_PRE_RESUME);
 	if (ret)
 		pr_err("Pre-resume script ret code %d\n", ret);
@@ -2500,6 +2726,9 @@ int cr_restore_tasks(void)
 		return -1;
 
 	if (prepare_pstree() < 0)
+		return -1;
+
+	if (prepare_next_images())
 		return -1;
 
 	if (fdstore_init())

@@ -931,6 +931,49 @@ void close_image_dir(void)
 	close_service_fd(IMG_FD_OFF);
 }
 
+static int next_images_dir_fd = -1;
+
+/*
+ * --next-images-dir must be empty, or a pagemap left by another restore
+ * could pass for one of this tree's tasks.
+ */
+int open_next_images_dir(const char *dir)
+{
+	struct dirent *de;
+	DIR *d;
+	int fd;
+
+	fd = open(dir, O_RDONLY | O_DIRECTORY);
+	if (fd < 0) {
+		pr_perror("Can't open next images dir %s", dir);
+		return -1;
+	}
+
+	d = fdopendir(dup(fd));
+	if (!d) {
+		pr_perror("Can't read next images dir %s", dir);
+		close(fd);
+		return -1;
+	}
+	while ((de = readdir(d)) != NULL) {
+		if (dir_dots(de))
+			continue;
+		pr_err("Next images dir %s is not empty\n", dir);
+		closedir(d);
+		close(fd);
+		return -1;
+	}
+	closedir(d);
+
+	next_images_dir_fd = fd;
+	return 0;
+}
+
+int get_next_images_dir_fd(void)
+{
+	return next_images_dir_fd;
+}
+
 int open_parent(int dfd, int *pfd)
 {
 	struct stat st;

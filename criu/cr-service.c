@@ -826,8 +826,25 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 	if (req->parent_img)
 		SET_CHAR_OPTS(img_parent, req->parent_img);
 
+	if (req->next_images_dir)
+		SET_CHAR_OPTS(next_images_dir, req->next_images_dir);
+
 	if (setup_images_and_workdir(images_dir_path, work_changed_by_rpc_conf, req, ids.pid))
 		goto err;
+
+	if (opts.mode == CR_RESTORE && opts.next_images_dir) {
+		char next_images_path[PATH_MAX];
+		const char *dir = opts.next_images_dir;
+
+		/* relative to the client, we are in the work dir already */
+		if (dir[0] != '/') {
+			snprintf(next_images_path, sizeof(next_images_path),
+				 "/proc/%d/cwd/%s", ids.pid, dir);
+			dir = next_images_path;
+		}
+		if (open_next_images_dir(dir))
+			goto err;
+	}
 
 	if (req->n_irmap_scan_paths) {
 		for (i = 0; i < req->n_irmap_scan_paths; i++) {
