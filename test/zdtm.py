@@ -1525,6 +1525,24 @@ class criu:
 
         print("Pages taken from the parent snapshot: %d" % parent_pages)
 
+    def check_parent_link(self, prev):
+        # The parent link names the snapshot the dump was taken against,
+        # except that a set written by restore --next-images-dir is linked
+        # past: the new images name the restored snapshot, so the set is
+        # not needed once the dump is done.
+        link = os.path.join(self.__ddir(), "parent")
+        target = os.readlink(link)
+        if target.startswith("/"):
+            raise test_fail_exc("absolute parent link %s" % target)
+        got = os.path.realpath(os.path.join(self.__ddir(), target))
+        if prev.endswith(".next"):
+            prev = prev[:-len(".next")]
+        want = os.path.realpath(os.path.join(self.__dump_path, prev))
+        if got != want:
+            raise test_fail_exc("parent link %s resolves to %s, want %s" %
+                                (target, got, want))
+        print("Parent link: %s" % target)
+
     def check_pages_counts(self, stream, had_parent):
         # A lazy dump writes no dump statistics, so the counts below cannot be
         # compared. The parent entries can, and that is the assertion which
@@ -1657,6 +1675,7 @@ class criu:
 
         a_opts = ["--tree", self.__test.getpid()]
         had_parent = bool(self.__prev_dump_iter)
+        prev_dump_iter = self.__prev_dump_iter
         if self.__prev_dump_iter:
             a_opts += [
                 "--prev-images-dir",
@@ -1765,6 +1784,8 @@ class criu:
 
         self.show_stats("dump")
         self.check_pages_counts(stream, had_parent)
+        if had_parent and not stream and not nowait:
+            self.check_parent_link(str(prev_dump_iter))
 
         if self.__leave_stopped:
             pstree_check_stopped(self.__test.getpid())
