@@ -83,7 +83,11 @@ The following levels are available:
 
 *--prev-images-dir* 'path'::
     Use 'path' as a parent directory where to look for sets of image files.
-    This option makes sense in case of incremental dumps.
+    This option makes sense in case of incremental dumps. If 'path' holds
+    the images written by *restore --next-images-dir*, the new images take
+    the images that restore came from as their parent instead: 'path' is
+    read only for the restore's uptime, which the pid-reuse check needs,
+    and nothing refers to it once the dump is done.
 
 *-W*, *--work-dir* 'dir'::
     Use directory 'dir' for putting logs, pidfiles and statistics. If not
@@ -607,7 +611,9 @@ usually need to be escaped from shell.
     the next incremental *dump* of the restored tasks. The images being
     restored are not modified. Implies *--track-mem*. Cannot be used with
     *--lazy-pages*, *--auto-dedup* or *--stream*. Shared memory is not
-    covered and is dumped in full.
+    covered and is dumped in full. A *dump* given 'path' as its
+    *--prev-images-dir* links its parent to the restored images, so 'path'
+    can be removed once that dump is done.
 
 *-s*, *--leave-stopped*::
     Leave tasks in stopped state after restore (rather than resuming
