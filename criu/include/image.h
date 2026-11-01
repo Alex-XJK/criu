@@ -206,6 +206,7 @@ extern int get_next_images_dir_fd(void);
  * Return 0 && pfd >= 0 -- opened
  */
 extern int open_parent(int dfd, int *pfd);
+extern int relative_dir_path(int from_fd, int to_fd, char *buf, size_t len);
 
 extern struct cr_img *open_image_at(int dfd, int type, unsigned long flags, ...);
 #define open_image(typ, flags, ...) open_image_at(-1, typ, flags, ##__VA_ARGS__)

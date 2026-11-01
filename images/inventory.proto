@@ -43,4 +43,12 @@ message inventory_entry {
 	optional uint32			compress = 15;
 	/* Block size in bytes when compress = 1. Informational. */
 	optional uint32			compress_block_size = 16;
+	/*
+	 * Written by restore --next-images-dir: this set has no pages of its
+	 * own. Its pagemaps list the restored images' entries with every page
+	 * in parent, dump_uptime is the restore's and parent links to the
+	 * restored images. A dump given it as --prev-images-dir takes the
+	 * uptime from it and links its parent to the set's parent.
+	 */
+	optional bool			next_images	= 17;
 }

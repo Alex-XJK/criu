@@ -2068,8 +2068,10 @@ static void reap_zombies(void)
  * for that dump: pagemaps with every entry in parent, no pages, a parent
  * link to the restored images and an inventory with dump_uptime set to
  * one tick after the newest restored task's start time, so that tasks
- * created after the restore still fail the pid-reuse check. The restored
- * images are left untouched.
+ * created after the restore still fail the pid-reuse check, and with
+ * next_images set, so that the dump takes the uptime from here and links
+ * its own parent to the restored images (link_past_next_images() in
+ * image.c). The restored images are left untouched.
  */
 static int write_next_pagemap(int nfd, struct pstree_item *item)
 {
@@ -2124,61 +2126,20 @@ out:
 	return ret;
 }
 
-static int fd_path(int fd, char *buf, size_t len)
-{
-	char fdpath[64];
-	ssize_t n;
-
-	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", fd);
-	n = readlink(fdpath, buf, len - 1);
-	if (n < 0) {
-		pr_perror("Can't resolve the path of fd %d", fd);
-		return -1;
-	}
-	buf[n] = '\0';
-	return 0;
-}
-
 /*
  * Relative like the --prev-images-dir link: tasks open it through the
  * directory fd once they are in the restored root.
  */
 static int link_next_parent(int nfd)
 {
-	char imgs[PATH_MAX], next[PATH_MAX], target[PATH_MAX];
-	const char *rest;
-	size_t i, common = 0, off = 0;
+	char target[PATH_MAX];
 
-	if (fd_path(get_service_fd(IMG_FD_OFF), imgs, sizeof(imgs)) ||
-	    fd_path(nfd, next, sizeof(next)))
+	if (relative_dir_path(nfd, get_service_fd(IMG_FD_OFF), target, sizeof(target)))
 		return -1;
-
-	for (i = 0; imgs[i] && imgs[i] == next[i]; i++)
-		if (imgs[i] == '/')
-			common = i;
-	if ((!imgs[i] && (!next[i] || next[i] == '/')) || (!next[i] && imgs[i] == '/'))
-		common = i;
-
-	for (rest = next + common; *rest; rest++) {
-		if (*rest == '/' && rest[1] && off + 3 < sizeof(target)) {
-			memcpy(target + off, "../", 3);
-			off += 3;
-		}
-	}
-	rest = imgs + common;
-	if (*rest == '/')
-		rest++;
-	if (!off && !*rest) {
-		pr_err("The next images dir %s is the images dir\n", next);
+	if (!target[0]) {
+		pr_err("The next images dir is the images dir\n");
 		return -1;
 	}
-	if (off + strlen(rest) >= sizeof(target)) {
-		pr_err("Parent path too long\n");
-		return -1;
-	}
-	strcpy(target + off, rest);
-	if (off && !*rest)
-		target[off - 1] = '\0';
 
 	if (symlinkat(target, nfd, CR_PARENT_LINK)) {
 		pr_perror("Can't link %s as the parent of the next images", target);
@@ -2222,6 +2183,8 @@ static int write_next_inventory(int nfd, uint64_t dump_uptime)
 
 	ie->dump_uptime = dump_uptime;
 	ie->has_dump_uptime = true;
+	ie->next_images = true;
+	ie->has_next_images = true;
 	/* holes only, no compressed payload */
 	ie->has_compress = true;
 	ie->compress = COMPRESS_OFF;

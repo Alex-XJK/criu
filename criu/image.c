@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <string.h>
 #include "crtools.h"
 #include "cr_options.h"
 #include "imgset.h"
@@ -413,6 +414,34 @@ int inventory_save_uptime(InventoryEntry *he)
 }
 
 /*
+ * The --prev-images-dir as given, kept open when open_image_dir() linked the
+ * parent past it: the inventory of a next-images set is still read from the
+ * set itself, see link_past_next_images().
+ */
+static int prev_images_fd = -1;
+
+static int read_inventory_at(int dir, InventoryEntry **ie)
+{
+	struct cr_img *img;
+
+	/* The parent snapshot is always on disk, even when streaming */
+	img = open_image_at(dir, CR_FD_INVENTORY, O_RSTR | O_FORCE_LOCAL);
+	if (!img) {
+		pr_err("Failed to open parent pre-dump inventory image\n");
+		return -1;
+	}
+
+	if (pb_read_one(img, ie, PB_INVENTORY) < 0) {
+		pr_err("Failed to read parent pre-dump inventory entry\n");
+		close_image(img);
+		return -1;
+	}
+
+	close_image(img);
+	return 0;
+}
+
+/*
  * Load the previous dump's inventory when a parent directory is configured.
  * A NULL *parent_ie is reserved for the normal first-dump case. Once a parent
  * directory exists its inventory is also needed to propagate the image-format
@@ -421,29 +450,26 @@ int inventory_save_uptime(InventoryEntry *he)
  */
 int get_parent_inventory(InventoryEntry **parent_ie)
 {
-	struct cr_img *img;
 	InventoryEntry *ie = NULL;
 	int dir;
 
 	*parent_ie = NULL;
-	if (open_parent(get_service_fd(IMG_FD_OFF), &dir)) {
-		pr_err("Failed to open parent directory\n");
-		return -1;
+	if (prev_images_fd >= 0) {
+		dir = dup(prev_images_fd);
+		if (dir < 0) {
+			pr_perror("Can't dup the parent images dir");
+			return -1;
+		}
+	} else {
+		if (open_parent(get_service_fd(IMG_FD_OFF), &dir)) {
+			pr_err("Failed to open parent directory\n");
+			return -1;
+		}
+		if (dir < 0)
+			return 0;
 	}
-	if (dir < 0)
-		return 0;
 
-	/* The parent snapshot is always on disk, even when streaming */
-	img = open_image_at(dir, CR_FD_INVENTORY, O_RSTR | O_FORCE_LOCAL);
-	if (!img) {
-		pr_err("Failed to open parent pre-dump inventory image\n");
-		close(dir);
-		return -1;
-	}
-
-	if (pb_read_one(img, &ie, PB_INVENTORY) < 0) {
-		pr_err("Failed to read parent pre-dump inventory entry\n");
-		close_image(img);
+	if (read_inventory_at(dir, &ie)) {
 		close(dir);
 		return -1;
 	}
@@ -474,14 +500,12 @@ int get_parent_inventory(InventoryEntry **parent_ie)
 		pr_warn("Parent pre-dump inventory has no uptime\n");
 	}
 
-	close_image(img);
 	close(dir);
 	*parent_ie = ie;
 	return 0;
 
 err:
 	inventory_entry__free_unpacked(ie, NULL);
-	close_image(img);
 	close(dir);
 	return -1;
 }
@@ -873,6 +897,117 @@ int image_dir_mode(void)
 	}
 }
 
+static int fd_path(int fd, char *buf, size_t len)
+{
+	char fdpath[64];
+	ssize_t n;
+
+	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", fd);
+	n = readlink(fdpath, buf, len - 1);
+	if (n < 0) {
+		pr_perror("Can't resolve the path of fd %d", fd);
+		return -1;
+	}
+	buf[n] = '\0';
+	return 0;
+}
+
+/*
+ * The relative path from the directory from_fd to the directory to_fd,
+ * through their resolved paths; empty when they are the same directory.
+ */
+int relative_dir_path(int from_fd, int to_fd, char *buf, size_t len)
+{
+	char from[PATH_MAX], to[PATH_MAX];
+	const char *rest;
+	size_t i, common = 0, off = 0;
+
+	if (fd_path(from_fd, from, sizeof(from)) || fd_path(to_fd, to, sizeof(to)))
+		return -1;
+
+	for (i = 0; from[i] && from[i] == to[i]; i++)
+		if (from[i] == '/')
+			common = i;
+	if ((!from[i] && (!to[i] || to[i] == '/')) || (!to[i] && from[i] == '/'))
+		common = i;
+
+	for (rest = from + common; *rest; rest++) {
+		if (*rest != '/' || !rest[1])
+			continue;
+		if (off + 3 >= len)
+			goto too_long;
+		memcpy(buf + off, "../", 3);
+		off += 3;
+	}
+	rest = to + common;
+	if (*rest == '/')
+		rest++;
+	if (off + strlen(rest) >= len)
+		goto too_long;
+	strcpy(buf + off, rest);
+	if (off && !*rest)
+		buf[off - 1] = '\0';
+	return 0;
+
+too_long:
+	pr_err("The path from %s to %s is too long\n", from, to);
+	return -1;
+}
+
+/*
+ * A set written by restore --next-images-dir has no pages of its own: its
+ * pagemaps name the restored images' entries with every page in parent. A
+ * dump given it as --prev-images-dir needs only its inventory, whose
+ * dump_uptime is the restore's, for the pid-reuse check; every page lookup
+ * through it ends one level up. So the parent link is written to the set's
+ * own parent and the set is kept open for the inventory. Returns 1 with
+ * target filled, 0 when the parent images are an ordinary set, -1 on error.
+ */
+static int link_past_next_images(int dfd, char *target, size_t len)
+{
+	InventoryEntry *ie = NULL;
+	int pfd, gfd, ret = -1;
+	bool next_images;
+
+	pfd = openat(dfd, opts.img_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (pfd < 0) {
+		pr_perror("Can't open parent images dir %s", opts.img_parent);
+		return -1;
+	}
+
+	if (read_inventory_at(pfd, &ie))
+		goto out;
+	next_images = ie->has_next_images && ie->next_images;
+	inventory_entry__free_unpacked(ie, NULL);
+	if (!next_images) {
+		ret = 0;
+		goto out;
+	}
+
+	gfd = openat(pfd, CR_PARENT_LINK, O_RDONLY | O_DIRECTORY);
+	if (gfd < 0) {
+		pr_perror("Can't open the parent of the next images %s", opts.img_parent);
+		goto out;
+	}
+	ret = relative_dir_path(dfd, gfd, target, len);
+	close(gfd);
+	if (ret)
+		goto out;
+	if (!target[0]) {
+		pr_err("The parent of the next images %s is the images dir\n", opts.img_parent);
+		ret = -1;
+		goto out;
+	}
+
+	pr_info("Parent %s is a next images set, linking past it to %s\n", opts.img_parent, target);
+	prev_images_fd = pfd;
+	return 1;
+
+out:
+	close(pfd);
+	return ret;
+}
+
 /*
  * `mode` should be O_RSTR or O_DUMP depending on the intent.
  * This is used when opts.stream is enabled for picking the right streamer
@@ -901,18 +1036,27 @@ int open_image_dir(const char *dir, int mode)
 	}
 
 	if (opts.img_parent) {
+		const char *parent = opts.img_parent;
+		char past[PATH_MAX];
+
 		if (faccessat(fd, opts.img_parent, R_OK, 0)) {
 			pr_perror("Invalid parent image directory provided");
 			goto err;
 		}
 
-		ret = symlinkat(opts.img_parent, fd, CR_PARENT_LINK);
+		ret = link_past_next_images(fd, past, sizeof(past));
+		if (ret < 0)
+			goto err;
+		if (ret)
+			parent = past;
+
+		ret = symlinkat(parent, fd, CR_PARENT_LINK);
 		if (ret < 0 && errno != EEXIST) {
 			pr_perror("Can't link parent snapshot");
 			goto err;
 		}
 
-		if (opts.img_parent[0] == '/')
+		if (parent[0] == '/')
 			pr_warn("Absolute paths for parent links "
 				"may not work on restore!\n");
 	}
@@ -928,6 +1072,10 @@ void close_image_dir(void)
 {
 	if (opts.stream)
 		img_streamer_finish();
+	if (prev_images_fd >= 0) {
+		close(prev_images_fd);
+		prev_images_fd = -1;
+	}
 	close_service_fd(IMG_FD_OFF);
 }
 
