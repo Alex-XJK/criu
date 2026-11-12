@@ -55,6 +55,7 @@
 #include "pie/restorer-blob.h"
 #include "crtools.h"
 #include "uffd.h"
+#include "kpage-share.h"
 #include "namespaces.h"
 #include "asyncd.h"
 #include "compression.h"
@@ -2663,6 +2664,9 @@ int cr_restore_tasks(void)
 	if (check_img_inventory(/* restore = */ true) < 0)
 		return -1;
 
+	if (kpage_share_init())
+		return -1;
+
 	if (init_stats(RESTORE_STATS))
 		return -1;
 
@@ -3616,6 +3620,15 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 		goto err;
 	}
 
+	task_args->kps_fd = -1;
+	if (kps_enabled) {
+		task_args->kps_fd = dup(get_service_fd(KPS_FD_OFF));
+		if (task_args->kps_fd < 0) {
+			pr_perror("can't dup kpage_share fd");
+			goto err;
+		}
+	}
+
 	task_args->fault_strategy = fi_strategy;
 
 	sigemptyset(&blockmask);
@@ -3853,6 +3866,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	close_service_fd(FDSTORE_SK_OFF);
 	close_service_fd(RPC_SK_OFF);
 	close_service_fd(CGROUPD_SK);
+	close_service_fd(KPS_FD_OFF);
 
 	__gcov_flush();
 

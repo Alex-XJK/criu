@@ -405,6 +405,8 @@ usage:
 	       "                        restore making it the parent of the restored process\n"
 	       "  --freeze-cgroup       use cgroup freezer to collect processes\n"
 	       "  --weak-sysctls        skip restoring sysctls that are not available\n"
+	       "  --kpage-share         restore private pages as copy-on-write pages shared\n"
+	       "                        through the kpage_share module (copied when absent)\n"
 	       "  --lazy-pages          restore pages on demand\n"
 	       "                        this requires running a second instance of criu\n"
 	       "                        in lazy-pages mode: 'criu lazy-pages -D DIR'\n"

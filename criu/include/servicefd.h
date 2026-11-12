@@ -30,6 +30,7 @@ enum sfd_type {
 	TRANSPORT_FD_OFF, /* to transfer file descriptors */
 	RPC_SK_OFF,
 	FDSTORE_SK_OFF,
+	KPS_FD_OFF,	  /* /dev/kpage_share for --kpage-share */
 
 	SERVICE_FD_MAX
 };

@@ -182,6 +182,7 @@ struct cr_options {
 	char *img_parent;
 	char *next_images_dir;
 	int auto_dedup;
+	int kpage_share;
 	unsigned int cpu_cap;
 	int force_irmap;
 	char **exec_cmd;

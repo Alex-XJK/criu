@@ -55,6 +55,7 @@ const char *sfd_type_name(enum sfd_type type)
 		[TRANSPORT_FD_OFF] = __stringify_1(TRANSPORT_FD_OFF),
 		[RPC_SK_OFF] = __stringify_1(RPC_SK_OFF),
 		[FDSTORE_SK_OFF] = __stringify_1(FDSTORE_SK_OFF),
+		[KPS_FD_OFF] = __stringify_1(KPS_FD_OFF),
 		[SERVICE_FD_MAX] = __stringify_1(SERVICE_FD_MAX),
 	};
 

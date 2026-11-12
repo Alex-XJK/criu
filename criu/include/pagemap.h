@@ -271,6 +271,9 @@ extern void page_read_disable_dedup(struct page_read *pr);
 
 extern int dedup_one_iovec(struct page_read *pr, unsigned long base, unsigned long len);
 
+/* Map up to nr pages at vaddr from the kpage_share pools; returns how many. */
+extern int page_read_map_pages(struct page_read *pr, unsigned long vaddr, unsigned long nr, void *dst);
+
 static inline unsigned long pagemap_len(PagemapEntry *pe)
 {
 	return pe->nr_pages * PAGE_SIZE;

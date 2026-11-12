@@ -53,6 +53,7 @@
 #include "net.h"
 #include "restorer.h"
 #include "uffd.h"
+#include "kpage-share.h"
 #include "linux/aio_abi.h"
 #include "mount-v2.h"
 
@@ -1219,6 +1220,25 @@ static int check_ipt_legacy(void)
 	return 0;
 }
 
+static int check_kpage_share(void)
+{
+	struct kps_stats st;
+	int fd;
+
+	fd = open(KPS_DEVICE, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		pr_perror("kpage_share: can't open %s", KPS_DEVICE);
+		return -1;
+	}
+	if (ioctl(fd, KPS_STATS, &st) < 0) {
+		pr_perror("kpage_share: KPS_STATS");
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	return 0;
+}
+
 static int check_uffd(void)
 {
 	if (!kdat.has_uffd) {
@@ -1863,6 +1883,7 @@ static struct feature_list feature_list[] = {
 	{ "tcp_half_closed", check_tcp_halt_closed },
 	{ "compat_cr", check_compat_cr },
 	{ "uffd", check_uffd },
+	{ "kpage_share", check_kpage_share },
 	{ "uffd-noncoop", check_uffd_noncoop },
 	{ "can_map_vdso", check_can_map_vdso },
 	{ "sk_ns", check_sk_netns },

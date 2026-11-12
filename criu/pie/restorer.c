@@ -51,6 +51,7 @@
 #include "images/inventory.pb-c.h"
 
 #include "shmem.h"
+#include "kpage-share.h"
 
 /*
  * sys_getgroups() buffer size. Not too much, to avoid stack overflow.
@@ -1862,6 +1863,87 @@ static int validate_direct_vma_io(struct restore_vma_io *rio)
 	return 0;
 }
 
+/* pread the file range [off, off + len) into base, retrying short reads. */
+static int kps_read_range(int fd, void *base, unsigned long len, unsigned long off)
+{
+	struct iovec iov;
+	ssize_t r;
+
+	while (len) {
+		iov.iov_base = base;
+		iov.iov_len = len;
+		r = sys_preadv(fd, &iov, 1, off);
+		if (r <= 0) {
+			pr_err("Can't read pages data at offset %lu (%d)\n", off, (int)r);
+			return -1;
+		}
+		base += r;
+		len -= r;
+		off += r;
+	}
+	return 0;
+}
+
+/*
+ * Restore an uncompressed VMA IO record with pages from the kpage_share pool
+ * of the pages image where possible. One record spans many VMAs; an iov the
+ * module refuses (a private file mapping, say) is read with preadv at its own
+ * offset and the mapping continues with the next iov.
+ */
+static int restore_vma_kps_mixed(struct task_restore_args *args, struct restore_vma_io *rio)
+{
+	struct iovec *iovs = rio->iovs;
+	unsigned int nr = rio->nr_iovs;
+	unsigned long off = rio->off, mapped = 0, copied = 0, rem;
+	struct kps_mapv m;
+	long ret;
+
+	while (nr) {
+		m.fd = args->vma_ios_fd;
+		m.flags = 0;
+		m.off = off;
+		m.iov = (unsigned long)iovs;
+		m.nr_iov = nr > KPS_MAX_IOV ? KPS_MAX_IOV : nr;
+		m.reason = 0;
+		m.done = 0;
+		ret = sys_ioctl(args->kps_fd, KPS_MAPV, (unsigned long)&m);
+		if (ret < 0 && !m.done && m.reason != KPS_R_VMA && m.reason != KPS_R_BUSY &&
+		    m.reason != KPS_R_FAULT) {
+			/* the pool itself is unavailable: copy everything that is left */
+			pr_debug("kpage_share: mapv failed %ld (reason %u), copying the rest\n", ret, m.reason);
+			break;
+		}
+		mapped += m.done;
+		/* skip the iovs that were mapped in full */
+		rem = m.done;
+		while (nr && iovs->iov_len <= rem) {
+			rem -= iovs->iov_len;
+			off += iovs->iov_len;
+			iovs++;
+			nr--;
+		}
+		if (!nr || m.reason == KPS_R_NONE)
+			continue;
+		/* the iov the module stopped in is copied, from where it stopped */
+		if (kps_read_range(args->vma_ios_fd, iovs->iov_base + rem, iovs->iov_len - rem, off + rem))
+			return -1;
+		copied += iovs->iov_len - rem;
+		off += iovs->iov_len;
+		iovs++;
+		nr--;
+	}
+	while (nr) {
+		if (kps_read_range(args->vma_ios_fd, iovs->iov_base, iovs->iov_len, off))
+			return -1;
+		copied += iovs->iov_len;
+		off += iovs->iov_len;
+		iovs++;
+		nr--;
+	}
+	pr_debug("kpage_share: mapped %lu bytes, copied %lu bytes\n", mapped, copied);
+	return 0;
+}
+
 static int restore_vma_preadv_mixed(struct task_restore_args *args)
 {
 	struct restore_vma_io *rio = args->vma_ios;
@@ -1881,6 +1963,11 @@ static int restore_vma_preadv_mixed(struct task_restore_args *args)
 				goto out;
 			}
 
+			if (args->kps_fd >= 0 && !args->auto_dedup) {
+				if (restore_vma_kps_mixed(args, rio))
+					goto out;
+				goto next;
+			}
 			if (restore_vma_preadv_one(args, rio, true))
 				goto out;
 			goto next;
@@ -2462,6 +2549,10 @@ __visible long __export_restore_task(struct task_restore_args *args)
 			     restore_vma_preadv_mixed(args);
 		if (rc < 0)
 			goto core_restore_end;
+	}
+	if (args->kps_fd >= 0) {
+		sys_close(args->kps_fd);
+		args->kps_fd = -1;
 	}
 
 	/*

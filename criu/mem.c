@@ -30,6 +30,7 @@
 #include "sk-packet.h"
 #include "files-reg.h"
 #include "pagemap.h"
+#include "kpage-share.h"
 #include "pagemap-cache.h"
 #include "fault-injection.h"
 #include "prctl.h"
@@ -1256,6 +1257,7 @@ static int restore_priv_vma_content(struct pstree_item *t, struct page_read *pr)
 	unsigned int nr_compared = 0;
 	unsigned int nr_enqueued = 0;
 	unsigned int nr_lazy = 0;
+	unsigned int nr_kps_mapped = 0;
 	unsigned long va;
 	void *buf = NULL;
 	bool page_read_closed = false;
@@ -1409,17 +1411,31 @@ static int restore_priv_vma_content(struct pstree_item *t, struct page_read *pr)
 				 */
 
 				nr = min_t(int, nr_pages - i, (vma->e->end - va) / PAGE_SIZE);
+				bitmap_set(vma->page_bitmap, off, nr);
 
-				set_bit(off, vma->page_bitmap);
-				ret = pr->read_pages(pr, va, nr, p, PR_ASYNC);
-				if (ret < 0)
-					goto err_read;
+				if (kps_enabled) {
+					int mapped = page_read_map_pages(pr, va, nr, p);
 
-				va += nr * PAGE_SIZE;
-				nr_restored += nr;
-				i += nr;
+					if (mapped < 0) {
+						ret = mapped;
+						goto err_read;
+					}
+					va += mapped * PAGE_SIZE;
+					p += mapped * PAGE_SIZE;
+					i += mapped;
+					nr -= mapped;
+					nr_restored += mapped;
+					nr_kps_mapped += mapped;
+				}
+				if (nr) {
+					ret = pr->read_pages(pr, va, nr, p, PR_ASYNC);
+					if (ret < 0)
+						goto err_read;
 
-				bitmap_set(vma->page_bitmap, off + 1, nr - 1);
+					va += nr * PAGE_SIZE;
+					nr_restored += nr;
+					i += nr;
+				}
 			}
 		}
 	}
@@ -1479,6 +1495,8 @@ err_read:
 	pr_info("nr_dropped_pages:  %d\n", nr_dropped);
 	pr_info("nr_enqueued:       %d\n", nr_enqueued);
 	pr_info("nr_lazy:           %d\n", nr_lazy);
+	pr_info("nr_kps_mapped:     %d\n", nr_kps_mapped);
+	kpage_share_log_stats();
 
 	exit_code = 0;
 	goto out;

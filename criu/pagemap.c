@@ -13,6 +13,7 @@
 #include "cr_options.h"
 #include "servicefd.h"
 #include "pagemap.h"
+#include "kpage-share.h"
 #include "restorer.h"
 #include "rst-malloc.h"
 #include "page-xfer.h"
@@ -1621,6 +1622,83 @@ static int maybe_read_page_remote(struct page_read *pr, unsigned long vaddr, uns
 	if (!ret)
 		ret = page_server_start_read(buf, nr, read_page_complete, pr, flags);
 	return ret;
+}
+
+/*
+ * Map pages of the current (local, uncompressed) entry from the
+ * kpage_share pool of this pages image instead of reading them.
+ */
+static long map_local_pages(struct page_read *pr, unsigned long vaddr, unsigned long nr, void *dst)
+{
+	long done;
+	int fd;
+
+	if (pr->streamed || (pr->maybe_read_page != maybe_read_page_local &&
+			     pr->maybe_read_page != maybe_read_page_local_compressed)) {
+		pr_debug("\tpr%lu-%u kpage_share: not a local reader\n", pr->img_id, pr->id);
+		return 0;
+	}
+	if (!pagemap_present(pr->pe) || (opts.lazy_pages && pagemap_lazy(pr->pe)) ||
+	    (pr->pe->blocks && pr->pe->blocks->n_block_sizes)) {
+		pr_debug("\tpr%lu-%u kpage_share: entry not mappable (flags %x)\n", pr->img_id, pr->id,
+			 pr->pe->flags);
+		return 0;
+	}
+	if (opts.auto_dedup && !pr->disable_dedup)
+		return 0;
+	if (pr->cvaddr != vaddr || (pr->pi_off & (PAGE_SIZE - 1))) {
+		pr_debug("\tpr%lu-%u kpage_share: cursor %lx vs %lx, offset %" PRIx64 "\n", pr->img_id, pr->id,
+			 pr->cvaddr, vaddr, (uint64_t)pr->pi_off);
+		return 0;
+	}
+	fd = img_raw_fd(pr->pi);
+	if (fd < 0)
+		return 0;
+	done = kpage_share_map(fd, pr->pi_off, dst, nr * PAGE_SIZE);
+	if (done > 0) {
+		pr_debug("\tpr%lu-%u Mapped %lx/%" PRIx64 " %ld pages\n", pr->img_id, pr->id, vaddr,
+			 (uint64_t)pr->pi_off, done / PAGE_SIZE);
+		pr->skip_pages(pr, done);
+	}
+	return done / PAGE_SIZE;
+}
+
+/*
+ * Like read_pagemap_page() along the parent chain, but mapping pool pages.
+ * Stops at the first piece that cannot be mapped; the caller reads the rest.
+ */
+int page_read_map_pages(struct page_read *pr, unsigned long vaddr, unsigned long nr, void *dst)
+{
+	unsigned long total = 0;
+
+	if (!kps_enabled)
+		return 0;
+	pagemap_bound_check(pr->pe, vaddr, nr);
+	if (!pagemap_in_parent(pr->pe))
+		return map_local_pages(pr, vaddr, nr, dst);
+
+	while (nr) {
+		struct page_read *ppr = pr->parent;
+		unsigned long p_nr;
+		long m;
+
+		if (!ppr || ppr->seek_pagemap(ppr, vaddr) <= 0)
+			break;
+		p_nr = ppr->pe->nr_pages - (vaddr - ppr->pe->vaddr) / PAGE_SIZE;
+		if (p_nr > nr)
+			p_nr = nr;
+		m = page_read_map_pages(ppr, vaddr, p_nr, dst);
+		if (m < 0)
+			return m;
+		total += m;
+		if ((unsigned long)m < p_nr)
+			break;
+		nr -= m;
+		vaddr += m * PAGE_SIZE;
+		dst += m * PAGE_SIZE;
+	}
+	pr->cvaddr += total * PAGE_SIZE;
+	return total;
 }
 
 static int read_pagemap_page(struct page_read *pr, unsigned long vaddr, unsigned long nr, void *buf, unsigned flags)

@@ -175,6 +175,7 @@ struct task_restore_args {
 	struct restore_vma_io *vma_ios;
 	unsigned int vma_ios_n;
 	bool vma_ios_use_direct;	/* set from probe_pages_o_direct() in mem.c */
+	int kps_fd;			/* /dev/kpage_share, or -1 */
 
 	struct restore_posix_timer *posix_timers;
 	unsigned int posix_timers_n;
