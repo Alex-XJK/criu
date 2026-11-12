@@ -68,10 +68,10 @@ static int check_pagemap(void)
 	struct pm_scan_arg args = {
 		.size = sizeof(struct pm_scan_arg),
 		.flags = 0,
-		.category_inverted = PAGE_IS_PFNZERO | PAGE_IS_FILE,
-		.category_mask = PAGE_IS_PFNZERO | PAGE_IS_FILE,
+		.category_inverted = PAGE_IS_PFNZERO,
+		.category_mask = PAGE_IS_PFNZERO,
 		.category_anyof_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED,
-		.return_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED | PAGE_IS_SOFT_DIRTY,
+		.return_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED | PAGE_IS_FILE | PAGE_IS_SOFT_DIRTY,
 	};
 
 	fd = __open_proc(PROC_SELF, EPERM, O_RDONLY, "pagemap");

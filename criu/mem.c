@@ -150,6 +150,15 @@ int should_dump_page(pmc_t *pmc, VmaEntry *vmae, u64 vaddr, struct page_info *pa
 		if (pmc->regs[pmc->regs_idx].categories & PAGE_IS_GUARD)
 			goto skip_guard_page;
 
+		/*
+		 * Optimisation for private mapping pages, that haven't
+		 * yet being COW-ed
+		 */
+		if (vma_entry_is(vmae, VMA_FILE_PRIVATE) && (pmc->regs[pmc->regs_idx].categories & PAGE_IS_FILE)) {
+			page_info->next = min(pmc->regs[pmc->regs_idx].end, vmae->end);
+			return 0;
+		}
+
 		page_info->softdirty = pmc->regs[pmc->regs_idx].categories & PAGE_IS_SOFT_DIRTY;
 		page_info->next = vaddr;
 		return 0;

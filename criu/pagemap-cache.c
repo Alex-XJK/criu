@@ -187,13 +187,17 @@ int pmc_fill(pmc_t *pmc, u64 start, u64 end)
 			.vec_len = pmc->regs_max_len,
 			.max_pages = 0,
 			/*
-			 * Request pages that are in  RAM or swap, excluding
-			 * zero-filled and file-backed pages.
+			 * Request pages that are in RAM or swap, excluding
+			 * zero-filled pages. File-backed pages are reported
+			 * rather than filtered out: should_dump_page() skips
+			 * them in private file mappings only, as the pagemap
+			 * read path does, so a non-anonymous page mapped into
+			 * an anonymous VMA is still dumped.
 			 */
-			.category_inverted = PAGE_IS_PFNZERO | PAGE_IS_FILE,
-			.category_mask = PAGE_IS_PFNZERO | PAGE_IS_FILE,
+			.category_inverted = PAGE_IS_PFNZERO,
+			.category_mask = PAGE_IS_PFNZERO,
 			.category_anyof_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED,
-			.return_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED | PAGE_IS_SOFT_DIRTY,
+			.return_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED | PAGE_IS_FILE | PAGE_IS_SOFT_DIRTY,
 		};
 		long ret;
 
